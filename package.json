@@ -1,0 +1,50 @@
+{
+  "name": "il-opendata-mcp",
+  "version": "0.1.0",
+  "description": "MCP server that lets AI agents search and query Israeli government open data (data.gov.il CKAN): datasets, resources and datastore records",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "start": "node dist/cli.js",
+    "prepare": "tsc"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "israel",
+    "open-data",
+    "data-gov-il",
+    "ckan",
+    "hebrew",
+    "ai-agents",
+    "llm-tools"
+  ],
+  "author": "Nadav Shtibel",
+  "license": "MIT",
+  "type": "module",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.5"
+  },
+  "types": "dist/index.d.ts",
+  "bin": {
+    "il-opendata-mcp": "dist/cli.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Shtibel1/il-opendata-mcp"
+  }
+}
