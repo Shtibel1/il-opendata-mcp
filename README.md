@@ -63,6 +63,39 @@ npm install && npm run build
 node dist/cli.js   # speaks MCP over stdio
 ```
 
+### Hosted: Streamable HTTP
+
+Run it as a network service that any remote MCP client (or several agents at once) can share:
+
+```bash
+npx -y github:Shtibel1/il-opendata-mcp --http --port 3000
+# → il-opendata-mcp listening on http://127.0.0.1:3000/mcp
+curl http://127.0.0.1:3000/healthz   # {"status":"ok","name":"il-opendata-mcp"}
+```
+
+Then point a client that supports remote servers at it:
+
+```json
+{ "mcpServers": { "il-opendata": { "url": "http://127.0.0.1:3000/mcp" } } }
+```
+
+| Flag | Env | Default | Notes |
+| --- | --- | --- | --- |
+| `--http` | | off | Serve [Streamable HTTP](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports#streamable-http) instead of stdio |
+| `--port` | `PORT` | `3000` | |
+| `--host` | `HOST` | `127.0.0.1` | Binds to loopback by default; use `0.0.0.0` inside a container |
+| `--allowed-origin` | | none | Repeatable. Browser requests from any other `Origin` get `403` (DNS-rebinding protection); non-browser clients without `Origin` are always allowed |
+
+The HTTP mode is **stateless**: every `POST /mcp` gets a fresh server and transport, there are no session ids, and `GET`/`DELETE /mcp` return `405`. That means instances can sit behind any load balancer with no sticky sessions. Bodies over 1 MB get `413`, malformed JSON gets `400`.
+
+Programmatic use:
+
+```ts
+import { startHttpServer } from "il-opendata-mcp";
+
+const { url, close } = await startHttpServer({ port: 0, allowedOrigins: ["https://app.example"] });
+```
+
 ### As a library
 
 ```ts
@@ -85,7 +118,10 @@ listFeaturedDatasets("companies"); // curated names such as ica_companies, gsa, 
 ```mermaid
 flowchart LR
   C["MCP client<br/>(Claude Desktop, Cursor, agents)"] -- stdio --> CLI[cli.ts]
+  R["Remote agents"] -- "POST /mcp" --> H["http.ts<br/>stateless Streamable HTTP<br/>origin check · /healthz"]
   CLI --> S["server.ts<br/>zod schemas · isError results"]
+  CLI -- "--http" --> H
+  H -- "new server per request" --> S
   S --> CKAN
   S --> CAT
   subgraph L["src/lib — no MCP imports"]
@@ -103,12 +139,14 @@ src/
   lib/ckan.ts      injectable-fetch CKAN client (no MCP imports)
   lib/catalog.ts   curated featured-dataset list (static, verified names only)
   server.ts        MCP tool wiring (zod schemas)
-  cli.ts           stdio transport entry
+  http.ts          stateless Streamable HTTP transport (node:http, no framework)
+  cli.ts           entry: stdio by default, --http for hosted mode
   index.ts         public exports
 test/
   ckan.test.ts     URL building, parsing, errors, pagination caps
   catalog.test.ts  category filters
   server.test.ts   end-to-end tests through a real MCP client (in-memory transport, mocked fetch)
+  http.test.ts     real HTTP server on an ephemeral port: client round-trip, statelessness, health, 400/403/404/405
 ```
 
 - **Pure core, thin adapter.** Networking and mapping live in `src/lib` with no MCP dependency, so the client is reusable as a plain TypeScript library.
@@ -151,7 +189,8 @@ This is an unofficial client. Data comes from [data.gov.il](https://data.gov.il)
 ## Roadmap
 
 - [ ] Publish to npm so `npx il-opendata-mcp` works without the GitHub shorthand
-- [ ] Hosted (Streamable HTTP) transport option
+- [x] Hosted (Streamable HTTP) transport option (v0.2.0)
+- [ ] Dockerfile and one-click deploy for the HTTP mode
 
 ## Contributing
 

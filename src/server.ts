@@ -26,7 +26,7 @@ function safe<A>(fn: (args: A) => unknown | Promise<unknown>) {
 const featuredCategoryEnum = z.enum(FEATURED_CATEGORIES);
 
 export function createServer(options: CkanClientOptions = {}): McpServer {
-  const server = new McpServer({ name: "il-opendata-mcp", version: "0.1.0" });
+  const server = new McpServer({ name: "il-opendata-mcp", version: "0.2.0" });
   const ckan = new CkanClient(options);
 
   server.registerTool(
