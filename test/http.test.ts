@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { startHttpServer, type RunningHttpServer } from "../src/http.js";
+import { parseAllowedOrigins, startHttpServer, type RunningHttpServer } from "../src/http.js";
 
 let running: RunningHttpServer | undefined;
 
@@ -90,5 +90,36 @@ describe("Streamable HTTP transport", () => {
     });
     expect((await fetch(running.url, init("https://evil.example"))).status).toBe(403);
     expect((await fetch(running.url, init("https://ok.example"))).status).toBe(200);
+  });
+});
+
+describe("parseAllowedOrigins", () => {
+  it("returns an empty list for unset or blank input", () => {
+    expect(parseAllowedOrigins(undefined)).toEqual([]);
+    expect(parseAllowedOrigins("  ,  ")).toEqual([]);
+  });
+
+  it("splits on commas and whitespace, drops trailing slashes and duplicates", () => {
+    expect(parseAllowedOrigins("https://a.example, https://b.example/\nhttps://a.example http://localhost:5173")).toEqual([
+      "https://a.example",
+      "https://b.example",
+      "http://localhost:5173",
+    ]);
+  });
+
+  it("rejects values that are not bare http(s) origins", () => {
+    expect(() => parseAllowedOrigins("not a url")).toThrow(/Invalid origin/);
+    expect(() => parseAllowedOrigins("ftp://files.example")).toThrow(/Invalid origin/);
+    expect(() => parseAllowedOrigins("https://a.example/path")).toThrow(/expected scheme/);
+  });
+
+  it("feeds straight into the origin guard", async () => {
+    running = await startHttpServer({ port: 0, fetch: mockFetch, allowedOrigins: parseAllowedOrigins("https://ok.example/") });
+    const body = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" });
+    const headers = { "Content-Type": "application/json", Accept: "application/json, text/event-stream" };
+    const denied = await fetch(running.url, { method: "POST", body, headers: { ...headers, Origin: "https://evil.example" } });
+    expect(denied.status).toBe(403);
+    const allowed = await fetch(running.url, { method: "POST", body, headers: { ...headers, Origin: "https://ok.example" } });
+    expect(allowed.status).toBe(200);
   });
 });

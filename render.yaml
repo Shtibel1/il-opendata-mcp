@@ -1,0 +1,12 @@
+# One-click deploy blueprint for Render (https://render.com/docs/blueprint-spec)
+services:
+  - type: web
+    name: il-opendata-mcp
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /healthz
+    envVars:
+      # Comma-separated browser origins allowed to call /mcp. Leave empty for non-browser clients only.
+      - key: ALLOWED_ORIGINS
+        sync: false

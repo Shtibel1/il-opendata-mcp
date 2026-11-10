@@ -19,3 +19,20 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t il-opendata-mcp:ci .
+      - name: Smoke test the image
+        run: |
+          docker run -d --name mcp -p 3000:3000 -e ALLOWED_ORIGINS=https://ok.example il-opendata-mcp:ci
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:3000/healthz && break; sleep 1; done
+          curl -fsS http://127.0.0.1:3000/healthz | grep -q '"status":"ok"'
+          body='{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+          hdr=(-H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream')
+          test "$(curl -s -o /dev/null -w '%{http_code}' "${hdr[@]}" -H 'Origin: https://evil.example' -d "$body" http://127.0.0.1:3000/mcp)" = 403
+          curl -fsS "${hdr[@]}" -d "$body" http://127.0.0.1:3000/mcp | grep -q search_datasets
+          test "$(docker inspect -f '{{.Config.User}}' mcp)" = node
+      - if: failure()
+        run: docker logs mcp

@@ -84,9 +84,26 @@ Then point a client that supports remote servers at it:
 | `--http` | | off | Serve [Streamable HTTP](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports#streamable-http) instead of stdio |
 | `--port` | `PORT` | `3000` | |
 | `--host` | `HOST` | `127.0.0.1` | Binds to loopback by default; use `0.0.0.0` inside a container |
-| `--allowed-origin` | | none | Repeatable. Browser requests from any other `Origin` get `403` (DNS-rebinding protection); non-browser clients without `Origin` are always allowed |
+| `--allowed-origin` | `ALLOWED_ORIGINS` | none | Repeatable flag, or a comma-separated env var. Browser requests from any other `Origin` get `403` (DNS-rebinding protection); non-browser clients without `Origin` are always allowed |
 
 The HTTP mode is **stateless**: every `POST /mcp` gets a fresh server and transport, there are no session ids, and `GET`/`DELETE /mcp` return `405`. That means instances can sit behind any load balancer with no sticky sessions. Bodies over 1 MB get `413`, malformed JSON gets `400`.
+
+### Docker
+
+The image runs the HTTP mode as the unprivileged `node` user, binds `0.0.0.0:3000`, and ships a `HEALTHCHECK` against `/healthz`:
+
+```bash
+docker build -t il-opendata-mcp .
+docker run --rm -p 3000:3000 -e ALLOWED_ORIGINS=https://app.example il-opendata-mcp
+```
+
+CI builds the image on every push and smoke-tests it: health check, a real `tools/list` call, the origin guard, and the non-root user.
+
+### One-click deploy
+
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/Shtibel1/il-opendata-mcp)
+
+The [`render.yaml`](render.yaml) blueprint builds the Dockerfile, wires `/healthz` as the health check, and prompts for `ALLOWED_ORIGINS`. Any container host (Fly.io, Railway, Cloud Run, ECS) works the same way: run the image and expose port 3000.
 
 Programmatic use:
 
@@ -190,7 +207,7 @@ This is an unofficial client. Data comes from [data.gov.il](https://data.gov.il)
 
 - [ ] Publish to npm so `npx il-opendata-mcp` works without the GitHub shorthand
 - [x] Hosted (Streamable HTTP) transport option (v0.2.0)
-- [ ] Dockerfile and one-click deploy for the HTTP mode
+- [x] Dockerfile and one-click deploy for the HTTP mode (v0.3.0)
 
 ## Contributing
 

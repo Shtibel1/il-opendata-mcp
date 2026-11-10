@@ -26,5 +26,5 @@ export type {
 export { FEATURED_CATEGORIES, FEATURED_DATASETS, listFeaturedDatasets } from "./lib/catalog.js";
 export type { FeaturedCategory, FeaturedDataset } from "./lib/catalog.js";
 export { createServer } from "./server.js";
-export { startHttpServer, DEFAULT_HTTP_HOST, DEFAULT_HTTP_PORT, MCP_PATH, MAX_BODY_BYTES } from "./http.js";
+export { startHttpServer, parseAllowedOrigins, DEFAULT_HTTP_HOST, DEFAULT_HTTP_PORT, MCP_PATH, MAX_BODY_BYTES } from "./http.js";
 export type { HttpServerOptions, RunningHttpServer } from "./http.js";

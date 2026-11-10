@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { parseArgs } from "node:util";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { DEFAULT_HTTP_HOST, DEFAULT_HTTP_PORT, startHttpServer } from "./http.js";
+import { DEFAULT_HTTP_HOST, DEFAULT_HTTP_PORT, parseAllowedOrigins, startHttpServer } from "./http.js";
 import { createServer } from "./server.js";
 
 const { values } = parseArgs({
@@ -22,7 +22,7 @@ Usage:
   il-opendata-mcp --http [--port 3000] [--host 127.0.0.1] [--allowed-origin https://app.example]
                                           serve Streamable HTTP at /mcp (stateless) and GET /healthz
 
-Environment: PORT and HOST are used when the flags are omitted.`);
+Environment: PORT, HOST and ALLOWED_ORIGINS (comma-separated) are used when the flags are omitted.`);
   process.exit(0);
 }
 
@@ -33,7 +33,16 @@ if (values.http) {
     process.exit(1);
   }
   const host = values.host ?? process.env.HOST ?? DEFAULT_HTTP_HOST;
-  const running = await startHttpServer({ host, port, allowedOrigins: values["allowed-origin"] });
+  let allowedOrigins: string[];
+  try {
+    allowedOrigins = values["allowed-origin"]?.length
+      ? parseAllowedOrigins(values["allowed-origin"].join(","))
+      : parseAllowedOrigins(process.env.ALLOWED_ORIGINS);
+  } catch (error) {
+    console.error((error as Error).message);
+    process.exit(1);
+  }
+  const running = await startHttpServer({ host, port, allowedOrigins });
   console.error(`il-opendata-mcp listening on ${running.url}`);
   const shutdown = () => void running.close().finally(() => process.exit(0));
   process.on("SIGINT", shutdown);

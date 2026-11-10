@@ -1,6 +1,6 @@
 {
   "name": "il-opendata-mcp",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "MCP server that lets AI agents search and query Israeli government open data (data.gov.il CKAN): datasets, resources and datastore records",
   "main": "dist/index.js",
   "scripts": {

@@ -22,6 +22,31 @@ export interface HttpServerOptions extends CkanClientOptions {
   allowedOrigins?: string[];
 }
 
+/**
+ * Parse a comma- or whitespace-separated list of origins (e.g. the ALLOWED_ORIGINS
+ * env var) into a de-duplicated array. Trailing slashes are dropped because browsers
+ * never send them in the Origin header. Throws on anything that is not an http(s) origin.
+ */
+export function parseAllowedOrigins(raw: string | undefined): string[] {
+  if (!raw) return [];
+  const origins = new Set<string>();
+  for (const entry of raw.split(/[\s,]+/)) {
+    const value = entry.trim().replace(/\/+$/, "");
+    if (!value) continue;
+    let url: URL;
+    try {
+      url = new URL(value);
+    } catch {
+      throw new Error(`Invalid origin: ${entry}`);
+    }
+    if ((url.protocol !== "http:" && url.protocol !== "https:") || url.origin !== value) {
+      throw new Error(`Invalid origin (expected scheme://host[:port]): ${entry}`);
+    }
+    origins.add(url.origin);
+  }
+  return [...origins];
+}
+
 export interface RunningHttpServer {
   server: Server;
   url: string;
