@@ -26,7 +26,7 @@ function safe<A>(fn: (args: A) => unknown | Promise<unknown>) {
 const featuredCategoryEnum = z.enum(FEATURED_CATEGORIES);
 
 export function createServer(options: CkanClientOptions = {}): McpServer {
-  const server = new McpServer({ name: "il-opendata-mcp", version: "0.3.0" });
+  const server = new McpServer({ name: "il-opendata-mcp", version: "0.4.0" });
   const ckan = new CkanClient(options);
 
   server.registerTool(
@@ -34,15 +34,40 @@ export function createServer(options: CkanClientOptions = {}): McpServer {
     {
       title: "Search data.gov.il datasets",
       description:
-        "Search the Israeli government open-data catalog (data.gov.il CKAN package_search). Returns a compact list of matching datasets with titles, truncated notes, organizations, tags and resource summaries, including how many resources have an active datastore. Use list_featured_datasets for a curated starting point.",
+        "Search the Israeli government open-data catalog (data.gov.il CKAN package_search). Returns a compact list of matching datasets with titles, truncated notes, organizations, tags and resource summaries, including how many resources have an active datastore. Optionally restrict to one publishing organization (slug from list_organizations). Use list_featured_datasets for a curated starting point.",
       inputSchema: {
-        q: z.string().describe("Free-text search query, e.g. 'חברות ממשלתיות' or 'fuel stations'"),
+        q: z
+          .string()
+          .optional()
+          .describe("Free-text search query, e.g. 'חברות ממשלתיות' or 'fuel stations'. Omit to list everything (e.g. with organization)"),
+        organization: z
+          .string()
+          .optional()
+          .describe("Optional organization slug from list_organizations, e.g. 'ministry_of_transport'"),
         rows: z.number().int().nonnegative().optional().describe("Number of datasets to return (default 10, max 50)"),
         start: z.number().int().nonnegative().optional().describe("Offset for pagination (default 0)"),
       },
     },
-    safe(({ q, rows, start }: { q: string; rows?: number; start?: number }) =>
-      ckan.searchDatasets({ q, rows, start }),
+    safe(
+      ({ q, organization, rows, start }: { q?: string; organization?: string; rows?: number; start?: number }) =>
+        ckan.searchDatasets({ q, organization, rows, start }),
+    ),
+  );
+
+  server.registerTool(
+    "list_organizations",
+    {
+      title: "List data.gov.il publishing organizations",
+      description:
+        "List the government ministries and authorities that publish on data.gov.il (CKAN organization_list), sorted by number of datasets. Optional q matches the slug or the Hebrew title, e.g. 'תחבורה' or 'transport'. Pass a returned name as search_datasets.organization.",
+      inputSchema: {
+        q: z.string().optional().describe("Substring to match in the organization slug or Hebrew title"),
+        limit: z.number().int().nonnegative().optional().describe("Number of organizations to return (default 25, max 100)"),
+        offset: z.number().int().nonnegative().optional().describe("Offset for pagination (default 0)"),
+      },
+    },
+    safe(({ q, limit, offset }: { q?: string; limit?: number; offset?: number }) =>
+      ckan.listOrganizations({ q, limit, offset }),
     ),
   );
 

@@ -5,8 +5,11 @@ import {
   DEFAULT_USER_AGENT,
   NOTES_MAX_CHARS,
   capDatastoreLimit,
+  capOrganizationsLimit,
   capSearchRows,
+  mapOrganizationListItem,
   mapPackage,
+  organizationFilterQuery,
   truncateNotes,
 } from "../src/lib/ckan.js";
 
@@ -275,5 +278,79 @@ describe("CkanClient", () => {
     });
     const result = await client.searchRecords({ resource_id: GSA_RESOURCE });
     expect(result.records).toEqual([]);
+  });
+});
+
+describe("organizations", () => {
+  const rawOrgs = [
+    { name: "airport_authority", title: "רשות שדות התעופה", resources_count: 4, __extras: { package_count: 4 } },
+    { name: "ministry_of_transport", title: "משרד התחבורה והבטיחות בדרכים", resources_count: 120, __extras: { package_count: 57 } },
+    { name: "mof", title: "משרד האוצר", package_count: 12, resources_count: 30 },
+    { title: "nameless" },
+  ];
+
+  function orgClient(seen: URL[] = []) {
+    return new CkanClient({
+      fetch: async (input) => {
+        const url = new URL(String(input));
+        seen.push(url);
+        return jsonResponse({ success: true, result: rawOrgs });
+      },
+    });
+  }
+
+  it("validates organization slugs before building fq", () => {
+    expect(organizationFilterQuery(" ministry_of_transport ")).toBe("organization:ministry_of_transport");
+    expect(() => organizationFilterQuery("mof OR tags:x")).toThrow(/Invalid organization/);
+    expect(() => organizationFilterQuery("משרד")).toThrow(/list_organizations/);
+  });
+
+  it("maps package_count from top level or __extras", () => {
+    expect(mapOrganizationListItem(rawOrgs[1])).toEqual({
+      name: "ministry_of_transport",
+      title: "משרד התחבורה והבטיחות בדרכים",
+      package_count: 57,
+      resources_count: 120,
+    });
+    expect(mapOrganizationListItem(rawOrgs[2]).package_count).toBe(12);
+    expect(mapOrganizationListItem({ name: "x" })).toEqual({ name: "x", title: "x", package_count: 0, resources_count: 0 });
+  });
+
+  it("caps organization limit at 100", () => {
+    expect(capOrganizationsLimit()).toBe(25);
+    expect(capOrganizationsLimit(500)).toBe(100);
+  });
+
+  it("lists organizations sorted by dataset count, skipping nameless rows", async () => {
+    const seen: URL[] = [];
+    const result = await orgClient(seen).listOrganizations();
+    expect(seen[0].pathname.endsWith("/organization_list")).toBe(true);
+    expect(seen[0].searchParams.get("all_fields")).toBe("true");
+    expect(result.total).toBe(3);
+    expect(result.organizations.map((org) => org.name)).toEqual(["ministry_of_transport", "mof", "airport_authority"]);
+  });
+
+  it("matches Hebrew titles and slugs, then paginates", async () => {
+    const client = orgClient();
+    const hebrew = await client.listOrganizations({ q: "תחבורה" });
+    expect(hebrew.organizations.map((org) => org.name)).toEqual(["ministry_of_transport"]);
+    const slug = await client.listOrganizations({ q: "AIRPORT" });
+    expect(slug.organizations.map((org) => org.name)).toEqual(["airport_authority"]);
+    const page = await client.listOrganizations({ limit: 1, offset: 1 });
+    expect(page).toMatchObject({ total: 3, organizations: [{ name: "mof" }] });
+  });
+
+  it("filters package_search by organization and allows an empty query", async () => {
+    let seen: URL | undefined;
+    const client = new CkanClient({
+      fetch: async (input) => {
+        seen = new URL(String(input));
+        return jsonResponse({ success: true, result: { count: 0, results: [] } });
+      },
+    });
+    await client.searchDatasets({ organization: "mof" });
+    expect(seen?.searchParams.get("fq")).toBe("organization:mof");
+    expect(seen?.searchParams.has("q")).toBe(false);
+    await expect(client.searchDatasets({ q: "x", organization: "bad slug" })).rejects.toThrow(/Invalid organization/);
   });
 });

@@ -1,11 +1,15 @@
 export const DEFAULT_BASE_URL = "https://data.gov.il/api/3/action";
 export const DEFAULT_USER_AGENT =
-  "il-opendata-mcp/0.1.0 (+https://github.com/Shtibel1/il-opendata-mcp)";
+  "il-opendata-mcp/0.4.0 (+https://github.com/Shtibel1/il-opendata-mcp)";
 export const SEARCH_ROWS_DEFAULT = 10;
 export const SEARCH_ROWS_MAX = 50;
 export const DATASTORE_LIMIT_DEFAULT = 10;
 export const DATASTORE_LIMIT_MAX = 100;
 export const NOTES_MAX_CHARS = 500;
+export const ORGANIZATIONS_LIMIT_DEFAULT = 25;
+export const ORGANIZATIONS_LIMIT_MAX = 100;
+/** CKAN organization slugs: lowercase letters, digits, "-" and "_" (2-100 chars). */
+export const ORGANIZATION_NAME_PATTERN = /^[a-z0-9_-]{2,100}$/;
 
 export interface CkanClientOptions {
   baseUrl?: string;
@@ -56,9 +60,31 @@ export interface RecordSearchResult {
 }
 
 export interface SearchDatasetsParams {
-  q: string;
+  q?: string;
+  /** Restrict results to one publishing organization (CKAN slug, see listOrganizations). */
+  organization?: string;
   rows?: number;
   start?: number;
+}
+
+export interface CompactOrganization {
+  name: string;
+  title: string;
+  package_count: number;
+  resources_count: number;
+}
+
+export interface OrganizationListResult {
+  /** Number of organizations matching `q` (before limit/offset). */
+  total: number;
+  organizations: CompactOrganization[];
+}
+
+export interface ListOrganizationsParams {
+  /** Case-insensitive substring match on slug or (Hebrew) title. */
+  q?: string;
+  limit?: number;
+  offset?: number;
 }
 
 export interface SearchRecordsParams {
@@ -109,6 +135,15 @@ interface RawPackage {
   resources?: RawResource[];
 }
 
+interface RawOrganizationListItem {
+  name?: string;
+  title?: string;
+  display_name?: string;
+  package_count?: number;
+  resources_count?: number;
+  __extras?: { package_count?: number; display_name?: string };
+}
+
 interface RawPackageSearch {
   count?: number;
   results?: RawPackage[];
@@ -132,6 +167,35 @@ export function truncateNotes(notes: string | null | undefined): string {
   const text = notes ?? "";
   if (text.length <= NOTES_MAX_CHARS) return text;
   return text.slice(0, NOTES_MAX_CHARS);
+}
+
+export function capOrganizationsLimit(limit?: number): number {
+  return clamp(limit, ORGANIZATIONS_LIMIT_DEFAULT, ORGANIZATIONS_LIMIT_MAX);
+}
+
+/** Builds a safe CKAN `fq` clause, rejecting anything that is not a plain organization slug. */
+export function organizationFilterQuery(organization: string): string {
+  const slug = organization.trim();
+  if (!ORGANIZATION_NAME_PATTERN.test(slug)) {
+    throw new Error(
+      `Invalid organization "${organization}": expected a CKAN slug such as "ministry_of_transport" (use list_organizations)`,
+    );
+  }
+  return `organization:${slug}`;
+}
+
+function toCount(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+export function mapOrganizationListItem(raw: RawOrganizationListItem): CompactOrganization {
+  const name = raw.name ?? "";
+  return {
+    name,
+    title: raw.title || raw.display_name || raw.__extras?.display_name || name,
+    package_count: toCount(raw.package_count ?? raw.__extras?.package_count),
+    resources_count: toCount(raw.resources_count),
+  };
 }
 
 function clamp(value: number | undefined, fallback: number, max: number): number {
@@ -205,14 +269,41 @@ export class CkanClient {
   }
 
   async searchDatasets(params: SearchDatasetsParams): Promise<DatasetSearchResult> {
+    const q = params.q?.trim();
     const result = await this.request<RawPackageSearch>("package_search", {
-      q: params.q,
+      q: q ? q : undefined,
+      fq: params.organization === undefined ? undefined : organizationFilterQuery(params.organization),
       rows: capSearchRows(params.rows),
       start: params.start === undefined ? undefined : Math.max(0, Math.floor(params.start)),
     });
     return {
       count: result.count ?? 0,
       datasets: (result.results ?? []).map(mapPackage),
+    };
+  }
+
+  async listOrganizations(params: ListOrganizationsParams = {}): Promise<OrganizationListResult> {
+    // data.gov.il publishes ~60 organizations, so one call is cheap and lets us
+    // match Hebrew titles locally (CKAN's own `q` only matches the slug).
+    const raw = await this.request<RawOrganizationListItem[]>("organization_list", {
+      all_fields: "true",
+      limit: 1000,
+    });
+    const needle = params.q?.trim().toLocaleLowerCase() ?? "";
+    const matches = raw
+      .map(mapOrganizationListItem)
+      .filter((org) => org.name.length > 0)
+      .filter(
+        (org) =>
+          needle.length === 0 ||
+          org.name.toLocaleLowerCase().includes(needle) ||
+          org.title.toLocaleLowerCase().includes(needle),
+      )
+      .sort((a, b) => b.package_count - a.package_count || a.name.localeCompare(b.name));
+    const offset = params.offset === undefined ? 0 : Math.max(0, Math.floor(params.offset));
+    return {
+      total: matches.length,
+      organizations: matches.slice(offset, offset + capOrganizationsLimit(params.limit)),
     };
   }
 

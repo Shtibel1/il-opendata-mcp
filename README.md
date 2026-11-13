@@ -22,7 +22,8 @@ This is the network / open-data counterpart to [hebrew-il-mcp](https://github.co
 
 | Tool | What it does |
 | --- | --- |
-| `search_datasets` | CKAN `package_search`. Free-text `q`, optional `rows` (default 10, max 50) and `start`. Returns the match count plus a compact dataset list (name, title, truncated notes, organization, tags, resource summaries and how many resources have `datastore_active`). |
+| `search_datasets` | CKAN `package_search`. Optional free-text `q`, optional `organization` slug (validated, sent as `fq=organization:<slug>`), optional `rows` (default 10, max 50) and `start`. Returns the match count plus a compact dataset list (name, title, truncated notes, organization, tags, resource summaries and how many resources have `datastore_active`). |
+| `list_organizations` | CKAN `organization_list` with `all_fields`. Lists the ~60 publishing ministries and authorities sorted by dataset count. Optional `q` matches the slug **or the Hebrew title** (e.g. `תחבורה`), plus `limit` (default 25, max 100) and `offset`. Feed a returned `name` into `search_datasets.organization`. |
 | `get_dataset` | CKAN `package_show` by package name or UUID. Returns the same compact metadata plus resources (`id`, `name`, `format`, `datastore_active`, `last_modified`). |
 | `describe_resource` | CKAN `datastore_search` with `limit=0` to return field names/types and the total record count. Clear error if the resource has no active datastore. |
 | `search_records` | CKAN `datastore_search`. Optional full-text `q`, exact-match `filters`, `fields`, `limit` (default 10, max 100) and `offset`. Returns `total`, `fields` and `records`. |
@@ -208,6 +209,7 @@ This is an unofficial client. Data comes from [data.gov.il](https://data.gov.il)
 - [ ] Publish to npm so `npx il-opendata-mcp` works without the GitHub shorthand
 - [x] Hosted (Streamable HTTP) transport option (v0.2.0)
 - [x] Dockerfile and one-click deploy for the HTTP mode (v0.3.0)
+- [x] Browse by publisher: `list_organizations` + `search_datasets.organization` filter (v0.4.0)
 
 ## Contributing
 

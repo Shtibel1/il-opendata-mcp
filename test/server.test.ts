@@ -47,6 +47,7 @@ describe("MCP server", () => {
       "describe_resource",
       "get_dataset",
       "list_featured_datasets",
+      "list_organizations",
       "search_datasets",
       "search_records",
     ]);
@@ -199,5 +200,31 @@ describe("MCP server", () => {
     const client = await connect(fetchImpl);
     await client.callTool({ name: "search_datasets", arguments: { q: "test" } });
     expect(agent).toBe(DEFAULT_USER_AGENT);
+  });
+
+  it("lists organizations through a mocked organization_list", async () => {
+    const fetchImpl: typeof fetch = async (input) => {
+      const url = new URL(String(input));
+      expect(url.pathname.endsWith("/organization_list")).toBe(true);
+      return jsonResponse({
+        success: true,
+        result: [{ name: "ministry_of_transport", title: "משרד התחבורה והבטיחות בדרכים", __extras: { package_count: 57 } }],
+      });
+    };
+    const client = await connect(fetchImpl);
+    const result = await client.callTool({ name: "list_organizations", arguments: { q: "תחבורה" } });
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      total: 1,
+      organizations: [{ name: "ministry_of_transport", package_count: 57 }],
+    });
+  });
+
+  it("returns a tool error for an invalid organization slug", async () => {
+    const client = await connect(async () => {
+      throw new Error("should not hit the network");
+    });
+    const result = await client.callTool({ name: "search_datasets", arguments: { organization: "mof OR x" } });
+    expect(result.isError).toBe(true);
   });
 });
