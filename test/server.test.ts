@@ -227,4 +227,80 @@ describe("MCP server", () => {
     const result = await client.callTool({ name: "search_datasets", arguments: { organization: "mof OR x" } });
     expect(result.isError).toBe(true);
   });
+
+  it("lists static resources and the dataset template", async () => {
+    const client = await connect();
+    const { resources } = await client.listResources();
+    const uris = resources.map((resource) => resource.uri);
+    expect(uris).toContain("opendata://featured");
+    expect(uris).toContain("opendata://organizations");
+    // The template advertises the curated datasets as concrete resources.
+    expect(uris).toContain("opendata://dataset/gsa");
+    const { resourceTemplates } = await client.listResourceTemplates();
+    expect(resourceTemplates.map((template) => template.uriTemplate)).toEqual(["opendata://dataset/{name}"]);
+  });
+
+  it("reads the featured-datasets resource without any network call", async () => {
+    const client = await connect((async () => {
+      throw new Error("network must not be used");
+    }) as typeof fetch);
+    const { contents } = await client.readResource({ uri: "opendata://featured" });
+    expect(contents[0]?.mimeType).toBe("application/json");
+    const body = JSON.parse(String(contents[0]?.text)) as { categories: string[]; datasets: Array<{ name: string }> };
+    expect(body.categories).not.toContain("all");
+    expect(body.datasets.map((dataset) => dataset.name)).toContain("ica_companies");
+  });
+
+  it("reads the organizations resource sorted by dataset count", async () => {
+    const fetchImpl: typeof fetch = async (input) => {
+      const url = new URL(String(input));
+      expect(url.pathname.endsWith("/organization_list")).toBe(true);
+      expect(url.searchParams.get("all_fields")).toBe("true");
+      return jsonResponse({
+        success: true,
+        result: [
+          { name: "mof", title: "משרד האוצר", package_count: 5 },
+          { name: "ministry_of_transport", title: "משרד התחבורה", package_count: 40 },
+        ],
+      });
+    };
+    const client = await connect(fetchImpl);
+    const { contents } = await client.readResource({ uri: "opendata://organizations" });
+    const body = JSON.parse(String(contents[0]?.text)) as { total: number; organizations: Array<{ name: string }> };
+    expect(body.total).toBe(2);
+    expect(body.organizations.map((org) => org.name)).toEqual(["ministry_of_transport", "mof"]);
+  });
+
+  it("reads one dataset through the opendata://dataset/{name} template", async () => {
+    const fetchImpl: typeof fetch = async (input) => {
+      const url = new URL(String(input));
+      expect(url.pathname.endsWith("/package_show")).toBe(true);
+      expect(url.searchParams.get("id")).toBe("gsa");
+      return jsonResponse({ success: true, result: samplePackage });
+    };
+    const client = await connect(fetchImpl);
+    const { contents } = await client.readResource({ uri: "opendata://dataset/gsa" });
+    expect(contents[0]?.uri).toBe("opendata://dataset/gsa");
+    const body = JSON.parse(String(contents[0]?.text)) as { name: string; datastoreActiveCount: number };
+    expect(body).toMatchObject({ name: "gsa", datastoreActiveCount: 1 });
+  });
+
+  it("rejects invalid dataset names in the resource template before calling CKAN", async () => {
+    let called = false;
+    const client = await connect((async () => {
+      called = true;
+      return jsonResponse({ success: true, result: samplePackage });
+    }) as typeof fetch);
+    await expect(client.readResource({ uri: "opendata://dataset/GSA%20OR%20x" })).rejects.toThrow(/Invalid dataset name/);
+    expect(called).toBe(false);
+  });
+
+  it("completes dataset names for the resource template", async () => {
+    const client = await connect();
+    const { completion } = await client.complete({
+      ref: { type: "ref/resource", uri: "opendata://dataset/{name}" },
+      argument: { name: "name", value: "ica" },
+    });
+    expect(completion.values).toEqual(["ica_companies", "ica_partnerships", "ica-changes"]);
+  });
 });

@@ -1,8 +1,9 @@
 import { createServer as createHttpServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import type { CkanClientOptions } from "./lib/ckan.js";
+import { CkanClient, type CkanClientOptions } from "./lib/ckan.js";
 import { createServer } from "./server.js";
+import { VERSION } from "./version.js";
 
 export const DEFAULT_HTTP_HOST = "127.0.0.1";
 export const DEFAULT_HTTP_PORT = 3000;
@@ -87,17 +88,19 @@ async function readJsonBody(req: IncomingMessage): Promise<unknown> {
 
 /**
  * Serve the MCP tools over Streamable HTTP in stateless mode: every POST to
- * /mcp gets a fresh McpServer + transport, so instances can scale horizontally
+ * /mcp gets a fresh McpServer + transport (sharing one cached CkanClient), so instances can scale horizontally
  * behind a load balancer with no sticky sessions. GET /healthz is a liveness probe.
  */
 export async function startHttpServer(options: HttpServerOptions = {}): Promise<RunningHttpServer> {
   const { host = DEFAULT_HTTP_HOST, port = DEFAULT_HTTP_PORT, allowedOrigins, ...ckanOptions } = options;
+  // One client for the whole process so every stateless request shares the response cache.
+  const ckan = new CkanClient(ckanOptions);
 
   const server = createHttpServer(async (req, res) => {
     const path = new URL(req.url ?? "/", "http://localhost").pathname;
 
     if (path === "/healthz" && req.method === "GET") {
-      sendJson(res, 200, { status: "ok", name: "il-opendata-mcp" });
+      sendJson(res, 200, { status: "ok", name: "il-opendata-mcp", version: VERSION });
       return;
     }
     if (path !== MCP_PATH) {
@@ -120,7 +123,7 @@ export async function startHttpServer(options: HttpServerOptions = {}): Promise<
 
     try {
       const body = await readJsonBody(req);
-      const mcp = createServer(ckanOptions);
+      const mcp = createServer(ckan);
       const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
       res.on("close", () => {
         void transport.close();

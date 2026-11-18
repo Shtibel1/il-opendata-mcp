@@ -33,6 +33,7 @@ jobs:
           hdr=(-H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream')
           test "$(curl -s -o /dev/null -w '%{http_code}' "${hdr[@]}" -H 'Origin: https://evil.example' -d "$body" http://127.0.0.1:3000/mcp)" = 403
           curl -fsS "${hdr[@]}" -d "$body" http://127.0.0.1:3000/mcp | grep -q search_datasets
+          curl -fsS "${hdr[@]}" -d '{"jsonrpc":"2.0","id":2,"method":"resources/list"}' http://127.0.0.1:3000/mcp | grep -q 'opendata://featured'
           test "$(docker inspect -f '{{.Config.User}}' mcp)" = node
       - if: failure()
         run: docker logs mcp

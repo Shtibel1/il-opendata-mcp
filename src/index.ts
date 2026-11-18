@@ -2,6 +2,8 @@ export {
   CkanClient,
   DEFAULT_BASE_URL,
   DEFAULT_USER_AGENT,
+  DEFAULT_CACHE_TTL_MS,
+  DEFAULT_CACHE_MAX_ENTRIES,
   SEARCH_ROWS_DEFAULT,
   SEARCH_ROWS_MAX,
   DATASTORE_LIMIT_DEFAULT,
@@ -28,3 +30,5 @@ export type { FeaturedCategory, FeaturedDataset } from "./lib/catalog.js";
 export { createServer } from "./server.js";
 export { startHttpServer, parseAllowedOrigins, DEFAULT_HTTP_HOST, DEFAULT_HTTP_PORT, MCP_PATH, MAX_BODY_BYTES } from "./http.js";
 export type { HttpServerOptions, RunningHttpServer } from "./http.js";
+export { TtlCache } from "./lib/cache.js";
+export { VERSION } from "./version.js";

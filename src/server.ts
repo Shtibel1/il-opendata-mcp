@@ -1,7 +1,8 @@
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { CkanClient, type CkanClientOptions } from "./lib/ckan.js";
-import { FEATURED_CATEGORIES, listFeaturedDatasets } from "./lib/catalog.js";
+import { FEATURED_CATEGORIES, FEATURED_DATASETS, listFeaturedDatasets } from "./lib/catalog.js";
+import { VERSION } from "./version.js";
 
 const json = (value: unknown) => ({
   content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }],
@@ -25,9 +26,20 @@ function safe<A>(fn: (args: A) => unknown | Promise<unknown>) {
 
 const featuredCategoryEnum = z.enum(FEATURED_CATEGORIES);
 
-export function createServer(options: CkanClientOptions = {}): McpServer {
-  const server = new McpServer({ name: "il-opendata-mcp", version: "0.4.0" });
-  const ckan = new CkanClient(options);
+const jsonResource = (uri: URL, value: unknown) => ({
+  contents: [{ uri: uri.href, mimeType: "application/json", text: JSON.stringify(value, null, 2) }],
+});
+
+/** CKAN package names: lowercase letters, digits, "-" and "_" (2-100 chars). */
+const DATASET_NAME_PATTERN = /^[a-z0-9_-]{2,100}$/;
+
+/**
+ * Build the MCP server. Pass client options, or an existing CkanClient to share
+ * its response cache across server instances (the stateless HTTP transport does this).
+ */
+export function createServer(options: CkanClientOptions | CkanClient = {}): McpServer {
+  const server = new McpServer({ name: "il-opendata-mcp", version: VERSION });
+  const ckan = options instanceof CkanClient ? options : new CkanClient(options);
 
   server.registerTool(
     "search_datasets",
@@ -151,6 +163,67 @@ export function createServer(options: CkanClientOptions = {}): McpServer {
       category,
       datasets: listFeaturedDatasets(category),
     })),
+  );
+
+  server.registerResource(
+    "featured-datasets",
+    "opendata://featured",
+    {
+      title: "Featured data.gov.il datasets",
+      description:
+        "Curated, verified shortlist of well-known data.gov.il datasets (companies, vehicles, education, fuel, government). Not a complete index. No network request is made.",
+      mimeType: "application/json",
+    },
+    async (uri) =>
+      jsonResource(uri, {
+        note: "Curated starting point, not a complete catalog index. Read opendata://dataset/{name} or use search_datasets.",
+        categories: FEATURED_CATEGORIES.filter((category) => category !== "all"),
+        datasets: FEATURED_DATASETS,
+      }),
+  );
+
+  server.registerResource(
+    "organizations",
+    "opendata://organizations",
+    {
+      title: "data.gov.il publishing organizations",
+      description:
+        "Every ministry and authority that publishes on data.gov.il, sorted by number of datasets (CKAN organization_list). Use a name as search_datasets.organization.",
+      mimeType: "application/json",
+    },
+    async (uri) => jsonResource(uri, await ckan.listOrganizations({ limit: 1000 })),
+  );
+
+  server.registerResource(
+    "dataset",
+    new ResourceTemplate("opendata://dataset/{name}", {
+      // Advertise the curated datasets; any valid CKAN package name can be read.
+      list: async () => ({
+        resources: FEATURED_DATASETS.map((dataset) => ({
+          uri: `opendata://dataset/${dataset.name}`,
+          name: dataset.name,
+          title: dataset.titleHe,
+          description: dataset.why,
+          mimeType: "application/json",
+        })),
+      }),
+      complete: {
+        name: (value) => FEATURED_DATASETS.map((dataset) => dataset.name).filter((name) => name.startsWith(value)),
+      },
+    }),
+    {
+      title: "data.gov.il dataset metadata",
+      description:
+        "Compact metadata and resource list for one data.gov.il dataset by CKAN package name (package_show), e.g. opendata://dataset/gsa.",
+      mimeType: "application/json",
+    },
+    async (uri, { name }) => {
+      const id = decodeURIComponent(String(Array.isArray(name) ? name[0] : name));
+      if (!DATASET_NAME_PATTERN.test(id)) {
+        throw new Error(`Invalid dataset name "${id}": expected a CKAN package name such as "gsa"`);
+      }
+      return jsonResource(uri, await ckan.getDataset(id));
+    },
   );
 
   return server;

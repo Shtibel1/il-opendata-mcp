@@ -1,6 +1,12 @@
+import { TtlCache } from "./cache.js";
+import { VERSION } from "../version.js";
+
 export const DEFAULT_BASE_URL = "https://data.gov.il/api/3/action";
-export const DEFAULT_USER_AGENT =
-  "il-opendata-mcp/0.4.0 (+https://github.com/Shtibel1/il-opendata-mcp)";
+export const DEFAULT_USER_AGENT = `il-opendata-mcp/${VERSION} (+https://github.com/Shtibel1/il-opendata-mcp)`;
+/** Default TTL for cached CKAN GET responses (5 minutes). The catalog changes slowly. */
+export const DEFAULT_CACHE_TTL_MS = 5 * 60_000;
+/** Default maximum number of cached CKAN responses (oldest evicted first). */
+export const DEFAULT_CACHE_MAX_ENTRIES = 256;
 export const SEARCH_ROWS_DEFAULT = 10;
 export const SEARCH_ROWS_MAX = 50;
 export const DATASTORE_LIMIT_DEFAULT = 10;
@@ -16,6 +22,16 @@ export interface CkanClientOptions {
   fetch?: typeof fetch;
   userAgent?: string;
   timeoutMs?: number;
+  /**
+   * How long successful CKAN responses are cached in memory, keyed by request URL.
+   * Concurrent identical requests share one network call and errors are never cached.
+   * 0 disables caching. Default 5 minutes.
+   */
+  cacheTtlMs?: number;
+  /** Maximum cached responses (oldest evicted first). Default 256. */
+  cacheMaxEntries?: number;
+  /** Clock used for cache expiry (injectable for tests). Default Date.now. */
+  now?: () => number;
 }
 
 export interface CompactResource {
@@ -260,12 +276,34 @@ export class CkanClient {
   private readonly fetchImpl: typeof fetch;
   private readonly userAgent: string;
   private readonly timeoutMs: number;
+  private readonly cache: TtlCache<unknown>;
 
   constructor(options: CkanClientOptions = {}) {
     this.baseUrl = (options.baseUrl ?? DEFAULT_BASE_URL).replace(/\/$/, "");
     this.fetchImpl = options.fetch ?? fetch;
     this.userAgent = options.userAgent ?? DEFAULT_USER_AGENT;
     this.timeoutMs = options.timeoutMs ?? 20_000;
+    const ttl = options.cacheTtlMs ?? DEFAULT_CACHE_TTL_MS;
+    this.cache = new TtlCache<unknown>(
+      Number.isFinite(ttl) ? Math.max(0, ttl) : DEFAULT_CACHE_TTL_MS,
+      options.cacheMaxEntries ?? DEFAULT_CACHE_MAX_ENTRIES,
+      options.now ?? Date.now,
+    );
+  }
+
+  /** Whether CKAN responses are cached (cacheTtlMs > 0). */
+  get cacheEnabled(): boolean {
+    return this.cache.enabled;
+  }
+
+  /** Number of cached CKAN responses (diagnostics/tests). */
+  get cacheSize(): number {
+    return this.cache.size;
+  }
+
+  /** Drop every cached CKAN response. */
+  clearCache(): void {
+    this.cache.clear();
   }
 
   async searchDatasets(params: SearchDatasetsParams): Promise<DatasetSearchResult> {
@@ -350,21 +388,24 @@ export class CkanClient {
     };
   }
 
-  private async request<T>(
-    action: string,
-    params: Record<string, string | number | undefined>,
-  ): Promise<T> {
+  private request<T>(action: string, params: Record<string, string | number | undefined>): Promise<T> {
     const url = new URL(`${this.baseUrl}/${action}`);
     for (const [key, value] of Object.entries(params)) {
       if (value === undefined) continue;
       url.searchParams.set(key, String(value));
     }
+    // Sort parameters so equivalent requests share one cache key.
+    url.searchParams.sort();
+    const href = url.toString();
+    return this.cache.getOrCreate(href, () => this.fetchAction<T>(action, href)) as Promise<T>;
+  }
 
+  private async fetchAction<T>(action: string, url: string): Promise<T> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     let response: Response;
     try {
-      response = await this.fetchImpl(url.toString(), {
+      response = await this.fetchImpl(url, {
         headers: {
           Accept: "application/json",
           "User-Agent": this.userAgent,

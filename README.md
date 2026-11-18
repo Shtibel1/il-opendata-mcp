@@ -12,7 +12,7 @@
 
 </div>
 
-<p align="center"><a href="#quick-start">Quick start</a> · <a href="#tools">Tools</a> · <a href="#architecture">Architecture</a> · <a href="#roadmap">Roadmap</a></p>
+<p align="center"><a href="#quick-start">Quick start</a> · <a href="#tools">Tools</a> · <a href="#resources">Resources</a> · <a href="#caching">Caching</a> · <a href="#architecture">Architecture</a> · <a href="#roadmap">Roadmap</a></p>
 
 A [Model Context Protocol](https://modelcontextprotocol.io) server that lets AI agents search the official [data.gov.il](https://data.gov.il) catalog and query datastore-backed resources through the public CKAN 3 API — datasets, resources and records, without dumping raw CKAN blobs into the context window.
 
@@ -31,12 +31,35 @@ This is the network / open-data counterpart to [hebrew-il-mcp](https://github.co
 
 Every tool returns both human-readable JSON text and `structuredContent`. Failures produce an MCP `isError` result instead of crashing the session.
 
+## Resources
+
+Clients that support [MCP resources](https://modelcontextprotocol.io/specification/2025-06-18/server/resources) can attach catalog context directly, without a tool call:
+
+| URI | What it returns |
+| --- | --- |
+| `opendata://featured` | The curated featured-dataset shortlist with categories. No network. |
+| `opendata://organizations` | Every publishing ministry/authority (~60), sorted by dataset count — same shape as `list_organizations`. |
+| `opendata://dataset/{name}` | Resource template: compact metadata + resources for one CKAN package, e.g. `opendata://dataset/gsa`. The featured datasets are listed as concrete resources, and dataset names autocomplete. Names are validated before CKAN is called. |
+
+All resources are `application/json`.
+
 Typical flow:
 
 1. `search_datasets` with a query such as `"חברות ממשלתיות"` (or start from `list_featured_datasets`).
 2. `get_dataset` with a package name from the results, e.g. `gsa`.
 3. `describe_resource` with a resource id where `datastore_active` is true.
 4. `search_records` with that resource id, optional `q` / `filters`, and a small `limit`.
+
+## Caching
+
+data.gov.il is slow (a full `organization_list` takes several seconds) and the catalog changes slowly, so successful CKAN GET responses are cached in memory, keyed by the full request URL:
+
+- **Default TTL 5 minutes**; `--cache-ttl <seconds>` or `IL_OPENDATA_CACHE_TTL` changes it, `0` disables caching.
+- **Shared across HTTP requests**: the stateless HTTP mode creates a fresh MCP server per request but reuses one `CkanClient`, so every agent hitting the same instance benefits.
+- **Concurrent identical requests share one network call**, errors and HTTP failures are never cached, and at most 256 responses are kept (oldest evicted first).
+- `list_organizations` filters locally, so every `q` reuses one cached `organization_list` response.
+
+Live on 2026-11-18: reading `opendata://organizations` took ~9.3 s cold and the following `list_organizations` call 4 ms; `get_dataset gsa` went from ~580 ms to 2 ms.
 
 ## Why
 
@@ -71,7 +94,7 @@ Run it as a network service that any remote MCP client (or several agents at onc
 ```bash
 npx -y github:Shtibel1/il-opendata-mcp --http --port 3000
 # → il-opendata-mcp listening on http://127.0.0.1:3000/mcp
-curl http://127.0.0.1:3000/healthz   # {"status":"ok","name":"il-opendata-mcp"}
+curl http://127.0.0.1:3000/healthz   # {"status":"ok","name":"il-opendata-mcp","version":"0.5.0"}
 ```
 
 Then point a client that supports remote servers at it:
@@ -86,6 +109,7 @@ Then point a client that supports remote servers at it:
 | `--port` | `PORT` | `3000` | |
 | `--host` | `HOST` | `127.0.0.1` | Binds to loopback by default; use `0.0.0.0` inside a container |
 | `--allowed-origin` | `ALLOWED_ORIGINS` | none | Repeatable flag, or a comma-separated env var. Browser requests from any other `Origin` get `403` (DNS-rebinding protection); non-browser clients without `Origin` are always allowed |
+| `--cache-ttl` | `IL_OPENDATA_CACHE_TTL` | `300` | Seconds to cache CKAN responses in memory (see [Caching](#caching)); `0` disables. Also applies to stdio mode |
 
 The HTTP mode is **stateless**: every `POST /mcp` gets a fresh server and transport, there are no session ids, and `GET`/`DELETE /mcp` return `405`. That means instances can sit behind any load balancer with no sticky sessions. Bodies over 1 MB get `413`, malformed JSON gets `400`.
 
@@ -119,7 +143,7 @@ const { url, close } = await startHttpServer({ port: 0, allowedOrigins: ["https:
 ```ts
 import { CkanClient, listFeaturedDatasets } from "il-opendata-mcp";
 
-const ckan = new CkanClient();
+const ckan = new CkanClient({ cacheTtlMs: 60_000 }); // optional; default 5 min, 0 disables
 const { count, datasets } = await ckan.searchDatasets({ q: "חינוך" });
 const dataset = await ckan.getDataset("gsa");
 const resource = dataset.resources.find((item) => item.datastore_active);
@@ -139,13 +163,15 @@ flowchart LR
   R["Remote agents"] -- "POST /mcp" --> H["http.ts<br/>stateless Streamable HTTP<br/>origin check · /healthz"]
   CLI --> S["server.ts<br/>zod schemas · isError results"]
   CLI -- "--http" --> H
-  H -- "new server per request" --> S
+  H -- "new server per request<br/>shared CkanClient" --> S
   S --> CKAN
   S --> CAT
   subgraph L["src/lib — no MCP imports"]
     CKAN["ckan.ts<br/>injectable fetch · CKAN 3 client"]
+    CACHE["cache.ts<br/>in-memory TTL cache"]
     CAT["catalog.ts<br/>curated featured list"]
   end
+  CKAN --> CACHE
   CKAN -- HTTPS --> GOV["data.gov.il<br/>/api/3/action"]
   APP["Your TS app"] -- import --> L
 ```
@@ -156,15 +182,18 @@ flowchart LR
 src/
   lib/ckan.ts      injectable-fetch CKAN client (no MCP imports)
   lib/catalog.ts   curated featured-dataset list (static, verified names only)
-  server.ts        MCP tool wiring (zod schemas)
+  lib/cache.ts     in-memory TTL cache (promise sharing, no cached errors, bounded size)
+  server.ts        MCP tool + resource wiring (zod schemas)
+  version.ts       single source of the version (handshake, User-Agent, /healthz)
   http.ts          stateless Streamable HTTP transport (node:http, no framework)
   cli.ts           entry: stdio by default, --http for hosted mode
   index.ts         public exports
 test/
   ckan.test.ts     URL building, parsing, errors, pagination caps
   catalog.test.ts  category filters
-  server.test.ts   end-to-end tests through a real MCP client (in-memory transport, mocked fetch)
-  http.test.ts     real HTTP server on an ephemeral port: client round-trip, statelessness, health, 400/403/404/405
+  cache.test.ts    TTL cache + CkanClient caching (expiry, keys, in-flight sharing, errors, disable)
+  server.test.ts   end-to-end tests through a real MCP client (tools, resources, completion; in-memory transport, mocked fetch)
+  http.test.ts     real HTTP server on an ephemeral port: client round-trip, statelessness, shared cache, health, 400/403/404/405
 ```
 
 - **Pure core, thin adapter.** Networking and mapping live in `src/lib` with no MCP dependency, so the client is reusable as a plain TypeScript library.
@@ -210,6 +239,8 @@ This is an unofficial client. Data comes from [data.gov.il](https://data.gov.il)
 - [x] Hosted (Streamable HTTP) transport option (v0.2.0)
 - [x] Dockerfile and one-click deploy for the HTTP mode (v0.3.0)
 - [x] Browse by publisher: `list_organizations` + `search_datasets.organization` filter (v0.4.0)
+- [x] In-memory response cache (`--cache-ttl`) shared across HTTP requests, and MCP resources `opendata://featured`, `opendata://organizations`, `opendata://dataset/{name}` (v0.5.0)
+- [ ] Structured datastore filters beyond exact match (ranges via `datastore_search_sql`)
 
 ## Contributing
 

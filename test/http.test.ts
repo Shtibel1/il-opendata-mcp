@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { parseAllowedOrigins, startHttpServer, type RunningHttpServer } from "../src/http.js";
+import { VERSION } from "../src/version.js";
 
 let running: RunningHttpServer | undefined;
 
@@ -23,6 +24,39 @@ async function connect(url: string) {
 }
 
 describe("Streamable HTTP transport", () => {
+  it("shares one response cache across stateless requests", async () => {
+    let calls = 0;
+    const countingFetch = (async (input: string | URL | Request) => {
+      calls += 1;
+      return mockFetch(input);
+    }) as typeof fetch;
+    running = await startHttpServer({ port: 0, fetch: countingFetch });
+
+    // Two separate client connections => two separate McpServer instances on the server.
+    for (let i = 0; i < 2; i++) {
+      const client = await connect(running.url);
+      const search = await client.callTool({ name: "search_datasets", arguments: { q: "gsa" } });
+      expect((search.structuredContent as { count: number }).count).toBe(1);
+      await client.close();
+    }
+    expect(calls).toBe(1);
+  });
+
+  it("does not cache across requests when cacheTtlMs is 0", async () => {
+    let calls = 0;
+    const countingFetch = (async (input: string | URL | Request) => {
+      calls += 1;
+      return mockFetch(input);
+    }) as typeof fetch;
+    running = await startHttpServer({ port: 0, fetch: countingFetch, cacheTtlMs: 0 });
+    for (let i = 0; i < 2; i++) {
+      const client = await connect(running.url);
+      await client.callTool({ name: "search_datasets", arguments: { q: "gsa" } });
+      await client.close();
+    }
+    expect(calls).toBe(2);
+  });
+
   it("serves tools to a real MCP client over HTTP", async () => {
     running = await startHttpServer({ port: 0, fetch: mockFetch });
     expect(running.url).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/mcp$/);
@@ -51,7 +85,7 @@ describe("Streamable HTTP transport", () => {
     running = await startHttpServer({ port: 0 });
     const res = await fetch(running.url.replace(/\/mcp$/, "/healthz"));
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ status: "ok", name: "il-opendata-mcp" });
+    expect(await res.json()).toEqual({ status: "ok", name: "il-opendata-mcp", version: VERSION });
   });
 
   it("returns 404 for unknown paths and 405 for GET /mcp", async () => {
