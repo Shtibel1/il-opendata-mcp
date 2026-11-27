@@ -14,6 +14,17 @@ export const DATASTORE_LIMIT_MAX = 100;
 export const NOTES_MAX_CHARS = 500;
 export const ORGANIZATIONS_LIMIT_DEFAULT = 25;
 export const ORGANIZATIONS_LIMIT_MAX = 100;
+/** list_field_values: distinct values returned by default / at most. */
+export const FIELD_VALUES_LIMIT_DEFAULT = 100;
+export const FIELD_VALUES_LIMIT_MAX = 1000;
+/** count_records: maximum group_by values counted per call. */
+export const COUNT_GROUP_VALUES_MAX = 25;
+/** Parallel CKAN requests used when counting group_by values. */
+export const COUNT_CONCURRENCY = 4;
+/** search_records: maximum number of sort keys. */
+export const SORT_KEYS_MAX = 5;
+/** Maximum values in one multi-value (OR) filter. */
+export const FILTER_VALUES_MAX = 100;
 /** CKAN organization slugs: lowercase letters, digits, "-" and "_" (2-100 chars). */
 export const ORGANIZATION_NAME_PATTERN = /^[a-z0-9_-]{2,100}$/;
 
@@ -103,13 +114,74 @@ export interface ListOrganizationsParams {
   offset?: number;
 }
 
+export type FilterScalar = string | number | boolean;
+/** Exact-match datastore filter: one value, or an array meaning "any of these" (OR). */
+export type FilterValue = FilterScalar | FilterScalar[];
+export type RecordFilters = Record<string, FilterValue>;
+
+export interface SortKey {
+  field: string;
+  direction?: "asc" | "desc";
+}
+
 export interface SearchRecordsParams {
   resource_id: string;
   q?: string;
-  filters?: Record<string, string>;
+  filters?: RecordFilters;
   limit?: number;
   offset?: number;
   fields?: string[];
+  /** Sort keys applied in order, e.g. [{ field: "shnat_yitzur", direction: "desc" }]. */
+  sort?: SortKey[];
+}
+
+export interface CountRecordsParams {
+  resource_id: string;
+  q?: string;
+  filters?: RecordFilters;
+  /** Count records per value of one field (exact match), on top of q/filters. */
+  group_by?: { field: string; values: FilterScalar[] };
+}
+
+export interface CountGroup {
+  value: FilterScalar;
+  count: number;
+  /** count / total, rounded to 4 decimals (0 when total is 0). */
+  share: number;
+}
+
+export interface CountRecordsResult {
+  resource_id: string;
+  /** Records matching q/filters. */
+  total: number;
+  group_by?: {
+    field: string;
+    /** Sorted by count, descending. */
+    groups: CountGroup[];
+    /** Matching records whose field has none of the requested values. */
+    other: number;
+  };
+}
+
+export interface ListFieldValuesParams {
+  resource_id: string;
+  field: string;
+  q?: string;
+  filters?: RecordFilters;
+  limit?: number;
+}
+
+export interface FieldValuesResult {
+  resource_id: string;
+  field: string;
+  /** Distinct values CKAN reports for the field under q/filters (null counts as one). */
+  total_distinct: number;
+  /** Distinct non-null values, sorted (numbers numerically, text in Hebrew collation). */
+  values: FilterScalar[];
+  has_null: boolean;
+  /** True when every distinct value was returned. */
+  complete: boolean;
+  note?: string;
 }
 
 interface CkanErrorBody {
@@ -198,6 +270,77 @@ export function organizationFilterQuery(organization: string): string {
     );
   }
   return `organization:${slug}`;
+}
+
+export function capFieldValuesLimit(limit?: number): number {
+  return clamp(limit, FIELD_VALUES_LIMIT_DEFAULT, FIELD_VALUES_LIMIT_MAX);
+}
+
+/** Field names are passed to CKAN as quoted identifiers, so reject anything that could break quoting. */
+export function validateFieldName(field: string, label = "field"): string {
+  const name = field.trim();
+  if (name.length === 0 || name.length > 100 || /["\\,\u0000-\u001f]/.test(name)) {
+    throw new Error(`Invalid ${label} "${field}": expected a datastore field name (see describe_resource)`);
+  }
+  return name;
+}
+
+/** Builds a CKAN datastore `sort` clause such as `"shnat_yitzur" desc, "mispar_rechev" asc`. */
+export function buildSortClause(sort: SortKey[] | undefined): string | undefined {
+  if (!sort || sort.length === 0) return undefined;
+  if (sort.length > SORT_KEYS_MAX) {
+    throw new Error(`Too many sort keys (${sort.length}); at most ${SORT_KEYS_MAX}`);
+  }
+  return sort
+    .map((key) => {
+      const direction = key.direction ?? "asc";
+      if (direction !== "asc" && direction !== "desc") {
+        throw new Error(`Invalid sort direction "${String(direction)}": expected asc or desc`);
+      }
+      return `"${validateFieldName(key.field, "sort field")}" ${direction}`;
+    })
+    .join(", ");
+}
+
+function isFilterScalar(value: unknown): value is FilterScalar {
+  return typeof value === "string" || typeof value === "boolean" || (typeof value === "number" && Number.isFinite(value));
+}
+
+/** Validates datastore filters and serializes them for CKAN (undefined when empty). */
+export function serializeFilters(filters: RecordFilters | undefined): string | undefined {
+  if (!filters) return undefined;
+  const entries = Object.entries(filters);
+  if (entries.length === 0) return undefined;
+  for (const [field, value] of entries) {
+    validateFieldName(field, "filter field");
+    if (Array.isArray(value)) {
+      if (value.length === 0 || value.length > FILTER_VALUES_MAX) {
+        throw new Error(`Filter "${field}" must list 1-${FILTER_VALUES_MAX} values`);
+      }
+      if (!value.every(isFilterScalar)) throw new Error(`Filter "${field}" values must be strings, numbers or booleans`);
+    } else if (!isFilterScalar(value)) {
+      throw new Error(`Filter "${field}" must be a string, number, boolean or an array of them`);
+    }
+  }
+  return JSON.stringify(filters);
+}
+
+function compareValues(a: FilterScalar, b: FilterScalar): number {
+  if (typeof a === "number" && typeof b === "number") return a - b;
+  return String(a).localeCompare(String(b), "he");
+}
+
+async function mapWithConcurrency<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const index = next++;
+      results[index] = await fn(items[index] as T);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
 }
 
 function toCount(value: unknown): number {
@@ -375,16 +518,111 @@ export class CkanClient {
       offset: params.offset === undefined ? undefined : Math.max(0, Math.floor(params.offset)),
       q: params.q,
       fields: params.fields && params.fields.length > 0 ? params.fields.join(",") : undefined,
-      filters:
-        params.filters && Object.keys(params.filters).length > 0
-          ? JSON.stringify(params.filters)
-          : undefined,
+      filters: serializeFilters(params.filters),
+      sort: buildSortClause(params.sort),
     };
     const result = await this.request<RawDatastoreSearch>("datastore_search", query);
     return {
       total: result.total ?? 0,
       fields: mapFields(result.fields),
       records: result.records ?? [],
+    };
+  }
+
+  /** Exact record count for q/filters, optionally broken down by the values of one field. */
+  async countRecords(params: CountRecordsParams): Promise<CountRecordsResult> {
+    const q = params.q?.trim() || undefined;
+    const base = params.filters ?? {};
+    serializeFilters(base);
+    const count = async (filters: RecordFilters): Promise<number> => {
+      const result = await this.request<RawDatastoreSearch>("datastore_search", {
+        resource_id: params.resource_id,
+        limit: 0,
+        q,
+        filters: serializeFilters(filters),
+      });
+      return result.total ?? 0;
+    };
+
+    if (!params.group_by) {
+      return { resource_id: params.resource_id, total: await count(base) };
+    }
+
+    const field = validateFieldName(params.group_by.field, "group_by field");
+    if (Object.prototype.hasOwnProperty.call(base, field)) {
+      throw new Error(`group_by field "${field}" is also in filters; remove it from one of them`);
+    }
+    const values: FilterScalar[] = [];
+    for (const value of params.group_by.values) {
+      if (!isFilterScalar(value)) throw new Error("group_by values must be strings, numbers or booleans");
+      if (!values.some((seen) => seen === value)) values.push(value);
+    }
+    if (values.length === 0 || values.length > COUNT_GROUP_VALUES_MAX) {
+      throw new Error(
+        `group_by needs 1-${COUNT_GROUP_VALUES_MAX} values (use list_field_values to discover them)`,
+      );
+    }
+
+    const [total, counts] = await Promise.all([
+      count(base),
+      mapWithConcurrency(values, COUNT_CONCURRENCY, (value) => count({ ...base, [field]: value })),
+    ]);
+    const groups = values
+      .map((value, index) => {
+        const n = counts[index] ?? 0;
+        return { value, count: n, share: total > 0 ? Math.round((n / total) * 10_000) / 10_000 : 0 };
+      })
+      .sort((a, b) => b.count - a.count || compareValues(a.value, b.value));
+    const grouped = groups.reduce((sum, group) => sum + group.count, 0);
+    return {
+      resource_id: params.resource_id,
+      total,
+      group_by: { field, groups, other: Math.max(0, total - grouped) },
+    };
+  }
+
+  /** Distinct values of one field (CKAN datastore_search with distinct=true). */
+  async listFieldValues(params: ListFieldValuesParams): Promise<FieldValuesResult> {
+    const field = validateFieldName(params.field);
+    const result = await this.request<RawDatastoreSearch>("datastore_search", {
+      resource_id: params.resource_id,
+      fields: field,
+      distinct: "true",
+      limit: capFieldValuesLimit(params.limit),
+      q: params.q?.trim() || undefined,
+      filters: serializeFilters(params.filters),
+    });
+    const seen = new Set<string>();
+    const values: FilterScalar[] = [];
+    let hasNull = false;
+    for (const record of result.records ?? []) {
+      const value = record[field];
+      if (value === null || value === undefined) {
+        hasNull = true;
+        continue;
+      }
+      const scalar: FilterScalar = isFilterScalar(value) ? value : JSON.stringify(value);
+      const key = `${typeof scalar}:${String(scalar)}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      values.push(scalar);
+    }
+    values.sort(compareValues);
+    const totalDistinct = result.total ?? values.length + (hasNull ? 1 : 0);
+    const complete = values.length + (hasNull ? 1 : 0) >= totalDistinct;
+    return {
+      resource_id: params.resource_id,
+      field,
+      total_distinct: totalDistinct,
+      values,
+      has_null: hasNull,
+      complete,
+      ...(complete
+        ? {}
+        : {
+            note:
+              "Partial list: data.gov.il applies the row limit before DISTINCT on large resources. Narrow it with q/filters, raise limit, or check candidates with count_records.",
+          }),
     };
   }
 
@@ -422,8 +660,12 @@ export class CkanClient {
     }
 
     if (!response.ok) {
+      const hint =
+        response.status === 404 && action.startsWith("datastore_")
+          ? " (data.gov.il answers invalid datastore queries with 404: check the resource_id with describe_resource and the field names in filters, fields and sort)"
+          : "";
       throw new Error(
-        `CKAN HTTP ${response.status}${response.statusText ? ` ${response.statusText}` : ""} for ${action}`,
+        `CKAN HTTP ${response.status}${response.statusText ? ` ${response.statusText}` : ""} for ${action}${hint}`,
       );
     }
 

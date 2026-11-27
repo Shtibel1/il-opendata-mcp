@@ -4,7 +4,13 @@ import {
   DEFAULT_BASE_URL,
   DEFAULT_USER_AGENT,
   NOTES_MAX_CHARS,
+  COUNT_GROUP_VALUES_MAX,
+  FIELD_VALUES_LIMIT_MAX,
+  buildSortClause,
   capDatastoreLimit,
+  capFieldValuesLimit,
+  serializeFilters,
+  validateFieldName,
   capOrganizationsLimit,
   capSearchRows,
   mapOrganizationListItem,
@@ -278,6 +284,230 @@ describe("CkanClient", () => {
     });
     const result = await client.searchRecords({ resource_id: GSA_RESOURCE });
     expect(result.records).toEqual([]);
+  });
+});
+
+describe("datastore query helpers", () => {
+  it("builds quoted sort clauses and rejects unsafe or excessive keys", () => {
+    expect(buildSortClause(undefined)).toBeUndefined();
+    expect(buildSortClause([])).toBeUndefined();
+    expect(buildSortClause([{ field: "shnat_yitzur", direction: "desc" }, { field: " mispar_rechev " }])).toBe(
+      '"shnat_yitzur" desc, "mispar_rechev" asc',
+    );
+    expect(buildSortClause([{ field: "שם עיר" }])).toBe('"שם עיר" asc');
+    expect(() => buildSortClause([{ field: 'x" desc; --' }])).toThrow(/Invalid sort field/);
+    expect(() => buildSortClause([{ field: "a,b" }])).toThrow(/Invalid sort field/);
+    expect(() => buildSortClause([{ field: "a", direction: "sideways" as "asc" }])).toThrow(/sort direction/);
+    expect(() => buildSortClause(Array.from({ length: 6 }, (_, i) => ({ field: `f${i}` })))).toThrow(/at most 5/);
+  });
+
+  it("validates field names", () => {
+    expect(validateFieldName("  COMPANY_NAME ")).toBe("COMPANY_NAME");
+    expect(() => validateFieldName("")).toThrow(/Invalid field/);
+    expect(() => validateFieldName("a\\b")).toThrow(/Invalid field/);
+    expect(() => validateFieldName("x".repeat(101))).toThrow(/Invalid field/);
+  });
+
+  it("serializes scalar and multi-value filters and rejects bad ones", () => {
+    expect(serializeFilters(undefined)).toBeUndefined();
+    expect(serializeFilters({})).toBeUndefined();
+    expect(JSON.parse(serializeFilters({ tozeret_nm: ["טויוטה יפן", "מאזדה יפן"], shnat_yitzur: 2026 }) ?? "")).toEqual({
+      tozeret_nm: ["טויוטה יפן", "מאזדה יפן"],
+      shnat_yitzur: 2026,
+    });
+    expect(() => serializeFilters({ STATUS: [] })).toThrow(/1-100 values/);
+    expect(() => serializeFilters({ STATUS: Array.from({ length: 101 }, (_, i) => i) })).toThrow(/1-100 values/);
+    expect(() => serializeFilters({ STATUS: { $gt: 1 } as unknown as string })).toThrow(/must be a string/);
+    expect(() => serializeFilters({ STATUS: [null] as unknown as string[] })).toThrow(/values must be/);
+    expect(() => serializeFilters({ 'a"b': "x" })).toThrow(/Invalid filter field/);
+  });
+
+  it("caps list_field_values limit", () => {
+    expect(capFieldValuesLimit()).toBe(100);
+    expect(capFieldValuesLimit(5000)).toBe(FIELD_VALUES_LIMIT_MAX);
+  });
+
+  it("sends sort and multi-value filters to datastore_search", async () => {
+    const client = new CkanClient({
+      cacheTtlMs: 0,
+      fetch: async (input) => {
+        const url = new URL(String(input));
+        expect(url.searchParams.get("sort")).toBe('"shnat_yitzur" desc');
+        expect(JSON.parse(url.searchParams.get("filters") ?? "")).toEqual({ tozeret_nm: ["a", "b"] });
+        return jsonResponse({ success: true, result: { total: 2, fields: [], records: [] } });
+      },
+    });
+    const result = await client.searchRecords({
+      resource_id: GSA_RESOURCE,
+      filters: { tozeret_nm: ["a", "b"] },
+      sort: [{ field: "shnat_yitzur", direction: "desc" }],
+    });
+    expect(result.total).toBe(2);
+  });
+
+  it("explains data.gov.il's 404 for invalid datastore queries", async () => {
+    const client = new CkanClient({
+      fetch: async () => new Response("<!DOCTYPE html>", { status: 404, statusText: "Not Found" }),
+    });
+    await expect(client.searchRecords({ resource_id: GSA_RESOURCE, sort: [{ field: "nope" }] })).rejects.toThrow(
+      /CKAN HTTP 404 Not Found for datastore_search \(data\.gov\.il answers invalid datastore queries with 404/,
+    );
+    await expect(client.getDataset("nope")).rejects.toThrow(/^CKAN HTTP 404 Not Found for package_show$/);
+  });
+});
+
+describe("count_records", () => {
+  const totals: Record<string, number> = { "": 300, "טויוטה יפן": 120, "קיה סלובקיה": 45, "אין כזה": 0 };
+
+  function countClient(seen: URL[]) {
+    return new CkanClient({
+      cacheTtlMs: 0,
+      fetch: async (input) => {
+        const url = new URL(String(input));
+        seen.push(url);
+        expect(url.pathname.endsWith("/datastore_search")).toBe(true);
+        expect(url.searchParams.get("limit")).toBe("0");
+        const filters = JSON.parse(url.searchParams.get("filters") ?? "{}") as Record<string, unknown>;
+        expect(filters.shnat_yitzur).toBe(2026);
+        const maker = typeof filters.tozeret_nm === "string" ? filters.tozeret_nm : "";
+        return jsonResponse({ success: true, result: { total: totals[maker] ?? 0, fields: [], records: [] } });
+      },
+    });
+  }
+
+  it("counts matching records with one limit=0 request", async () => {
+    const seen: URL[] = [];
+    const result = await countClient(seen).countRecords({ resource_id: GSA_RESOURCE, filters: { shnat_yitzur: 2026 } });
+    expect(result).toEqual({ resource_id: GSA_RESOURCE, total: 300 });
+    expect(seen).toHaveLength(1);
+  });
+
+  it("breaks the count down by field values, sorted by count, with shares and remainder", async () => {
+    const seen: URL[] = [];
+    const result = await countClient(seen).countRecords({
+      resource_id: GSA_RESOURCE,
+      filters: { shnat_yitzur: 2026 },
+      group_by: { field: "tozeret_nm", values: ["אין כזה", "קיה סלובקיה", "טויוטה יפן", "קיה סלובקיה"] },
+    });
+    expect(result.total).toBe(300);
+    expect(result.group_by).toEqual({
+      field: "tozeret_nm",
+      groups: [
+        { value: "טויוטה יפן", count: 120, share: 0.4 },
+        { value: "קיה סלובקיה", count: 45, share: 0.15 },
+        { value: "אין כזה", count: 0, share: 0 },
+      ],
+      other: 135,
+    });
+    // One total + three de-duplicated values.
+    expect(seen).toHaveLength(4);
+  });
+
+  it("limits concurrent requests while counting", async () => {
+    let inFlight = 0;
+    let peak = 0;
+    const client = new CkanClient({
+      cacheTtlMs: 0,
+      fetch: async () => {
+        inFlight += 1;
+        peak = Math.max(peak, inFlight);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        inFlight -= 1;
+        return jsonResponse({ success: true, result: { total: 1, fields: [], records: [] } });
+      },
+    });
+    const values = Array.from({ length: 12 }, (_, i) => `v${i}`);
+    const result = await client.countRecords({ resource_id: GSA_RESOURCE, group_by: { field: "f", values } });
+    expect(result.group_by?.groups).toHaveLength(12);
+    expect(result.group_by?.groups.every((group) => group.share === 1)).toBe(true);
+    // 4 group workers + the total request.
+    expect(peak).toBeLessThanOrEqual(5);
+  });
+
+  it("rejects conflicting, empty or oversized group_by", async () => {
+    const client = new CkanClient({
+      fetch: async () => {
+        throw new Error("network should not be used");
+      },
+    });
+    await expect(
+      client.countRecords({
+        resource_id: GSA_RESOURCE,
+        filters: { tozeret_nm: "x" },
+        group_by: { field: "tozeret_nm", values: ["x"] },
+      }),
+    ).rejects.toThrow(/also in filters/);
+    await expect(
+      client.countRecords({ resource_id: GSA_RESOURCE, group_by: { field: "f", values: [] } }),
+    ).rejects.toThrow(/1-25 values/);
+    await expect(
+      client.countRecords({
+        resource_id: GSA_RESOURCE,
+        group_by: { field: "f", values: Array.from({ length: COUNT_GROUP_VALUES_MAX + 1 }, (_, i) => i) },
+      }),
+    ).rejects.toThrow(/1-25 values/);
+  });
+});
+
+describe("list_field_values", () => {
+  it("returns sorted distinct values and marks complete lists", async () => {
+    const client = new CkanClient({
+      fetch: async (input) => {
+        const url = new URL(String(input));
+        expect(url.searchParams.get("fields")).toBe("ROLE");
+        expect(url.searchParams.get("distinct")).toBe("true");
+        expect(url.searchParams.get("limit")).toBe("100");
+        return jsonResponse({
+          success: true,
+          result: {
+            total: 5,
+            fields: [{ id: "ROLE", type: "text" }],
+            records: [{ ROLE: "מנכ\"ל" }, { ROLE: "דירקטור" }, { ROLE: null }, { ROLE: "יו\"ר" }, { ROLE: "דח\"צ" }],
+          },
+        });
+      },
+    });
+    const result = await client.listFieldValues({ resource_id: GSA_RESOURCE, field: "ROLE" });
+    expect(result).toEqual({
+      resource_id: GSA_RESOURCE,
+      field: "ROLE",
+      total_distinct: 5,
+      values: ["דח\"צ", "דירקטור", "יו\"ר", "מנכ\"ל"],
+      has_null: true,
+      complete: true,
+    });
+  });
+
+  it("sorts numbers numerically and flags partial lists", async () => {
+    const client = new CkanClient({
+      fetch: async (input) => {
+        const url = new URL(String(input));
+        expect(url.searchParams.get("limit")).toBe("1000");
+        expect(JSON.parse(url.searchParams.get("filters") ?? "")).toEqual({ tozeret_nm: "טויוטה יפן" });
+        return jsonResponse({
+          success: true,
+          result: { total: 40, fields: [], records: [{ y: 2026 }, { y: 2009 }, { y: 2019 }, { y: 2009 }] },
+        });
+      },
+    });
+    const result = await client.listFieldValues({
+      resource_id: GSA_RESOURCE,
+      field: "y",
+      filters: { tozeret_nm: "טויוטה יפן" },
+      limit: 9999,
+    });
+    expect(result.values).toEqual([2009, 2019, 2026]);
+    expect(result.complete).toBe(false);
+    expect(result.note).toMatch(/Partial list/);
+  });
+
+  it("rejects unsafe field names before calling CKAN", async () => {
+    const client = new CkanClient({
+      fetch: async () => {
+        throw new Error("network should not be used");
+      },
+    });
+    await expect(client.listFieldValues({ resource_id: GSA_RESOURCE, field: 'a",b' })).rejects.toThrow(/Invalid field/);
   });
 });
 

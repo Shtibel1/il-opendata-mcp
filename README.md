@@ -26,7 +26,9 @@ This is the network / open-data counterpart to [hebrew-il-mcp](https://github.co
 | `list_organizations` | CKAN `organization_list` with `all_fields`. Lists the ~60 publishing ministries and authorities sorted by dataset count. Optional `q` matches the slug **or the Hebrew title** (e.g. `תחבורה`), plus `limit` (default 25, max 100) and `offset`. Feed a returned `name` into `search_datasets.organization`. |
 | `get_dataset` | CKAN `package_show` by package name or UUID. Returns the same compact metadata plus resources (`id`, `name`, `format`, `datastore_active`, `last_modified`). |
 | `describe_resource` | CKAN `datastore_search` with `limit=0` to return field names/types and the total record count. Clear error if the resource has no active datastore. |
-| `search_records` | CKAN `datastore_search`. Optional full-text `q`, exact-match `filters`, `fields`, `limit` (default 10, max 100) and `offset`. Returns `total`, `fields` and `records`. |
+| `search_records` | CKAN `datastore_search`. Optional full-text `q`, exact-match `filters` (a list means "any of these", numbers and booleans allowed), `fields`, `sort` (up to 5 `{ field, direction }` keys), `limit` (default 10, max 100) and `offset`. Returns `total`, `fields` and `records`. |
+| `count_records` | Exact number of matching records without downloading rows (`datastore_search` with `limit=0`). Optional `group_by: { field, values }` counts up to 25 values of one field (4 parallel requests) and returns each `count`, its `share` of the total and the `other` remainder — e.g. 2026 Toyota Japan vs Kia Slovakia registrations. |
+| `list_field_values` | Sorted distinct values of one field (`distinct=true`), optionally under `q`/`filters`, to discover valid filter values. Returns `total_distinct`, `values`, `has_null` and `complete`; `limit` default 100, max 1000. data.gov.il applies the row limit before DISTINCT on large resources, so a partial list is flagged with `complete: false` and a note. |
 | `list_featured_datasets` | No network. Optional `category`: `companies`, `vehicles`, `education`, `fuel`, `government` or `all` (default). Returns a curated starting point of well-known datasets — **not a complete index**. Use `search_datasets` for everything else. |
 
 Every tool returns both human-readable JSON text and `structuredContent`. Failures produce an MCP `isError` result instead of crashing the session.
@@ -48,7 +50,10 @@ Typical flow:
 1. `search_datasets` with a query such as `"חברות ממשלתיות"` (or start from `list_featured_datasets`).
 2. `get_dataset` with a package name from the results, e.g. `gsa`.
 3. `describe_resource` with a resource id where `datastore_active` is true.
-4. `search_records` with that resource id, optional `q` / `filters`, and a small `limit`.
+4. `list_field_values` to see which values a field takes (statuses, cities, manufacturers).
+5. `count_records` for exact totals and breakdowns, and `search_records` with `filters`, `sort` and a small `limit` for the rows themselves.
+
+Example (live, 2026-11-27, vehicle registry `053cea08-09bc-40ec-8f7a-156f0677aff3`, 4.2M rows): `count_records` with `filters: { "shnat_yitzur": 2026 }` and `group_by: { "field": "tozeret_nm", "values": ["טויוטה יפן", "קיה סלובקיה"] }` returns 304,049 vehicles from 2026 — 16,745 Toyota Japan (5.5%) and 5,168 Kia Slovakia (1.7%) — in three small requests instead of paging millions of rows.
 
 ## Caching
 
@@ -94,7 +99,7 @@ Run it as a network service that any remote MCP client (or several agents at onc
 ```bash
 npx -y github:Shtibel1/il-opendata-mcp --http --port 3000
 # → il-opendata-mcp listening on http://127.0.0.1:3000/mcp
-curl http://127.0.0.1:3000/healthz   # {"status":"ok","name":"il-opendata-mcp","version":"0.5.0"}
+curl http://127.0.0.1:3000/healthz   # {"status":"ok","name":"il-opendata-mcp","version":"0.6.0"}
 ```
 
 Then point a client that supports remote servers at it:
@@ -240,7 +245,8 @@ This is an unofficial client. Data comes from [data.gov.il](https://data.gov.il)
 - [x] Dockerfile and one-click deploy for the HTTP mode (v0.3.0)
 - [x] Browse by publisher: `list_organizations` + `search_datasets.organization` filter (v0.4.0)
 - [x] In-memory response cache (`--cache-ttl`) shared across HTTP requests, and MCP resources `opendata://featured`, `opendata://organizations`, `opendata://dataset/{name}` (v0.5.0)
-- [ ] Structured datastore filters beyond exact match (ranges via `datastore_search_sql`)
+- [x] `count_records` (exact totals and `group_by` breakdowns), `list_field_values`, `search_records.sort` and multi-value filters (v0.6.0)
+- [ ] Range filters beyond exact match. `datastore_search_sql` is reachable, but data.gov.il's gateway rejects `WHERE` clauses and `COUNT(*)` with an HTML 404, so it is not a reliable base yet
 
 ## Contributing
 

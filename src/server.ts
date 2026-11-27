@@ -1,6 +1,16 @@
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { CkanClient, type CkanClientOptions } from "./lib/ckan.js";
+import {
+  COUNT_GROUP_VALUES_MAX,
+  CkanClient,
+  FIELD_VALUES_LIMIT_MAX,
+  FILTER_VALUES_MAX,
+  SORT_KEYS_MAX,
+  type CkanClientOptions,
+  type FilterScalar,
+  type RecordFilters,
+  type SortKey,
+} from "./lib/ckan.js";
 import { FEATURED_CATEGORIES, FEATURED_DATASETS, listFeaturedDatasets } from "./lib/catalog.js";
 import { VERSION } from "./version.js";
 
@@ -23,6 +33,14 @@ function safe<A>(fn: (args: A) => unknown | Promise<unknown>) {
     }
   };
 }
+
+const filterScalar = z.union([z.string(), z.number(), z.boolean()]);
+const filtersSchema = z
+  .record(z.string(), z.union([filterScalar, z.array(filterScalar).min(1).max(FILTER_VALUES_MAX)]))
+  .optional()
+  .describe(
+    'Exact-match field filters. A list means "any of these", e.g. { "tozeret_nm": ["טויוטה יפן", "מאזדה יפן"], "shnat_yitzur": 2026 }',
+  );
 
 const featuredCategoryEnum = z.enum(FEATURED_CATEGORIES);
 
@@ -114,17 +132,24 @@ export function createServer(options: CkanClientOptions | CkanClient = {}): McpS
     {
       title: "Search datastore records",
       description:
-        "Query rows in a data.gov.il datastore resource (CKAN datastore_search). Supports full-text q, exact-match filters, field selection, limit (default 10, max 100) and offset. The resource must have an active datastore.",
+        "Query rows in a data.gov.il datastore resource (CKAN datastore_search). Supports full-text q, exact-match filters (a list means any of these), field selection, sort, limit (default 10, max 100) and offset. The resource must have an active datastore.",
       inputSchema: {
         resource_id: z.string().min(1).describe("CKAN resource UUID with datastore_active=true"),
         q: z.string().optional().describe("Full-text search across the datastore"),
-        filters: z
-          .record(z.string(), z.string())
-          .optional()
-          .describe('Exact-match field filters, e.g. { "STATUS": "פעיל" }'),
+        filters: filtersSchema,
         limit: z.number().int().nonnegative().optional().describe("Number of records to return (default 10, max 100)"),
         offset: z.number().int().nonnegative().optional().describe("Offset for pagination (default 0)"),
         fields: z.array(z.string()).optional().describe("Optional list of field names to return"),
+        sort: z
+          .array(
+            z.object({
+              field: z.string().min(1).describe("Field name from describe_resource"),
+              direction: z.enum(["asc", "desc"]).optional().describe("asc (default) or desc"),
+            }),
+          )
+          .max(SORT_KEYS_MAX)
+          .optional()
+          .describe(`Sort keys applied in order (max ${SORT_KEYS_MAX}), e.g. [{ "field": "shnat_yitzur", "direction": "desc" }]`),
       },
     },
     safe(
@@ -135,14 +160,88 @@ export function createServer(options: CkanClientOptions | CkanClient = {}): McpS
         limit,
         offset,
         fields,
+        sort,
       }: {
         resource_id: string;
         q?: string;
-        filters?: Record<string, string>;
+        filters?: RecordFilters;
         limit?: number;
         offset?: number;
         fields?: string[];
-      }) => ckan.searchRecords({ resource_id, q, filters, limit, offset, fields }),
+        sort?: SortKey[];
+      }) => ckan.searchRecords({ resource_id, q, filters, limit, offset, fields, sort }),
+    ),
+  );
+
+  server.registerTool(
+    "count_records",
+    {
+      title: "Count datastore records",
+      description: `Exact number of records in a data.gov.il datastore resource that match optional q/filters, without downloading rows (datastore_search with limit 0). Optional group_by counts records per value of one field (up to ${COUNT_GROUP_VALUES_MAX} values, e.g. manufacturers or roles from list_field_values) and returns each count, its share of the total and the remainder ("other").`,
+      inputSchema: {
+        resource_id: z.string().min(1).describe("CKAN resource UUID with datastore_active=true"),
+        q: z.string().optional().describe("Full-text search across the datastore"),
+        filters: filtersSchema,
+        group_by: z
+          .object({
+            field: z.string().min(1).describe("Field to break the count down by"),
+            values: z
+              .array(filterScalar)
+              .min(1)
+              .max(COUNT_GROUP_VALUES_MAX)
+              .describe("Values of that field to count (exact match)"),
+          })
+          .optional()
+          .describe('Optional breakdown, e.g. { "field": "tozeret_nm", "values": ["טויוטה יפן", "קיה קוריאה"] }'),
+      },
+    },
+    safe(
+      ({
+        resource_id,
+        q,
+        filters,
+        group_by,
+      }: {
+        resource_id: string;
+        q?: string;
+        filters?: RecordFilters;
+        group_by?: { field: string; values: FilterScalar[] };
+      }) => ckan.countRecords({ resource_id, q, filters, group_by }),
+    ),
+  );
+
+  server.registerTool(
+    "list_field_values",
+    {
+      title: "List distinct values of a field",
+      description: `Distinct values of one field in a data.gov.il datastore resource (datastore_search with distinct=true), sorted, optionally under q/filters. Use it to discover valid filter values (statuses, cities, manufacturers) before search_records or count_records. limit caps the rows CKAN scans (default 100, max ${FIELD_VALUES_LIMIT_MAX}); complete=false means the list is partial.`,
+      inputSchema: {
+        resource_id: z.string().min(1).describe("CKAN resource UUID with datastore_active=true"),
+        field: z.string().min(1).describe("Field name from describe_resource"),
+        q: z.string().optional().describe("Full-text search across the datastore"),
+        filters: filtersSchema,
+        limit: z
+          .number()
+          .int()
+          .nonnegative()
+          .optional()
+          .describe(`Maximum values to return (default 100, max ${FIELD_VALUES_LIMIT_MAX})`),
+      },
+    },
+    safe(
+      ({
+        resource_id,
+        field,
+        q,
+        filters,
+        limit,
+      }: {
+        resource_id: string;
+        field: string;
+        q?: string;
+        filters?: RecordFilters;
+        limit?: number;
+      }) => ckan.listFieldValues({ resource_id, field, q, filters, limit }),
     ),
   );
 

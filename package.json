@@ -1,6 +1,6 @@
 {
   "name": "il-opendata-mcp",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "MCP server that lets AI agents search and query Israeli government open data (data.gov.il CKAN): datasets, resources and datastore records",
   "main": "dist/index.js",
   "scripts": {
@@ -21,7 +21,8 @@
     "ai-agents",
     "llm-tools",
     "mcp-resources",
-    "caching"
+    "caching",
+    "datastore"
   ],
   "author": "Nadav Shtibel",
   "license": "MIT",

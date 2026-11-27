@@ -44,9 +44,11 @@ describe("MCP server", () => {
     const client = await connect();
     const { tools } = await client.listTools();
     expect(tools.map((tool) => tool.name).sort()).toEqual([
+      "count_records",
       "describe_resource",
       "get_dataset",
       "list_featured_datasets",
+      "list_field_values",
       "list_organizations",
       "search_datasets",
       "search_records",
@@ -151,6 +153,58 @@ describe("MCP server", () => {
       total: 1,
       records: [{ COMPANY_NAME: "חברת החשמל" }],
     });
+  });
+
+  it("counts records by group through the count_records tool", async () => {
+    const fetchImpl: typeof fetch = async (input) => {
+      const url = new URL(String(input));
+      expect(url.searchParams.get("limit")).toBe("0");
+      const filters = JSON.parse(url.searchParams.get("filters") ?? "{}") as Record<string, string>;
+      const total = filters.ROLE === "דירקטור" ? 300 : filters.ROLE === 'מנכ"ל' ? 43 : 407;
+      return jsonResponse({ success: true, result: { total, fields: [], records: [] } });
+    };
+    const client = await connect(fetchImpl);
+    const res = await client.callTool({
+      name: "count_records",
+      arguments: { resource_id: GSA_RESOURCE, group_by: { field: "ROLE", values: ['מנכ"ל', "דירקטור"] } },
+    });
+    expect(res.isError).toBeFalsy();
+    expect(res.structuredContent).toMatchObject({
+      total: 407,
+      group_by: { field: "ROLE", groups: [{ value: "דירקטור", count: 300 }, { value: 'מנכ"ל', count: 43 }], other: 64 },
+    });
+  });
+
+  it("lists distinct values and passes sort through search_records", async () => {
+    const fetchImpl: typeof fetch = async (input) => {
+      const url = new URL(String(input));
+      if (url.searchParams.get("distinct") === "true") {
+        return jsonResponse({ success: true, result: { total: 2, fields: [], records: [{ ROLE: "יו\"ר" }, { ROLE: "דירקטור" }] } });
+      }
+      expect(url.searchParams.get("sort")).toBe('"LAST_NAME" desc');
+      return jsonResponse({ success: true, result: { total: 1, fields: [], records: [{ LAST_NAME: "תירוש" }] } });
+    };
+    const client = await connect(fetchImpl);
+    const values = await client.callTool({ name: "list_field_values", arguments: { resource_id: GSA_RESOURCE, field: "ROLE" } });
+    expect(values.structuredContent).toMatchObject({ values: ["דירקטור", 'יו"ר'], complete: true });
+    const records = await client.callTool({
+      name: "search_records",
+      arguments: { resource_id: GSA_RESOURCE, sort: [{ field: "LAST_NAME", direction: "desc" }] },
+    });
+    expect(records.structuredContent).toMatchObject({ records: [{ LAST_NAME: "תירוש" }] });
+  });
+
+  it("returns isError for invalid sort or filters instead of calling CKAN", async () => {
+    const fetchImpl: typeof fetch = async () => {
+      throw new Error("network should not be used");
+    };
+    const client = await connect(fetchImpl);
+    const res = await client.callTool({
+      name: "search_records",
+      arguments: { resource_id: GSA_RESOURCE, sort: [{ field: 'x"; drop' }] },
+    });
+    expect(res.isError).toBe(true);
+    expect((res.content as Array<{ text: string }>)[0].text).toMatch(/Invalid sort field/);
   });
 
   it("returns isError when CKAN fails instead of crashing the session", async () => {
